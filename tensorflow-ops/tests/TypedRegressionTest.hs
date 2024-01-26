@@ -10,51 +10,195 @@ import Test.HUnit (assertBool)
 import qualified TensorFlow.Core as TF
 import qualified TensorFlow.GenOps.Core as TF
 import qualified TensorFlow.Minimize as TF
-import qualified TensorFlow.Ops as TF hiding (initializedVariable)
+import qualified TensorFlow.Ops as TF hiding (initializedVariable,shape)
 import qualified TensorFlow.Variable as TF
+import qualified TensorFlow.Tensor as TF (toTensor)
 
 import Prelude hiding (id,(.))
 import Control.Category
 import Data.Complex (Complex)
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Word (Word8, Word16, Word32, Word64)
--- import Numeric.Neural
 
-class Param p where
+-- import Text.XHtml (param)
 
-instance (Param p, Param q) => Param(p,q)
+import Control.Lens
+-- import System.IO
+-- import Control.Monad.State (State, execState, get)
+-- import Control.Monad (when)
 
-type ParaLike p s a = (p,s) -> a 
+-- import Data.Set (Set, empty)
+import Data.Either
+-- import Data.Stream.Infinite (Stream(..))
+import qualified Data.Vector as V
+import qualified Control.Arrow as A
 
-data Para s a = forall p. Para(ParaLike p s a) 
+type D = (Int32,Int32)
 
-comp :: Para s a -> Para a b -> Para s b
-comp (Para f) (Para g) = Para $ \ ((p,q),s) -> g(q,f(p,s))
+addD :: D -> D -> D
+addD d1 d2 = (fst d1 + fst d2, snd d1 + snd d2)
 
-instance Category Para where
-    id = Para $ \ ((),x) -> x 
-    (Para g) . (Para f) = Para $ \ ((p,q),s) -> g(q,f(p,s))
+data T = E D D D
+    | I D D
+    deriving (Show,Eq)
 
--- Forward function of the model component
--- Simply constructs the predicted y values out of the given x, a and b
-f_fwd :: forall v'1 t . (TF.OneOf '[(Data.Complex.Complex Double),
+-- To give the dimensions for the lens p a b serve as input parameters
+data Term =
+    Comp Term Term |
+    PComp Term Term |
+    Tensor Term Term |
+    Hide Term |
+    Id D |
+    -- Loss and Alpha as base terms, see the type checker for their definitions
+    Loss D D |
+    Alpha |
+    Model D D D
+    deriving (Show,Eq)
+
+getInputD :: T -> D
+getInputD (E _ a _) = a 
+getInputD (I a _) = a
+
+getParaD :: T -> D
+getParaD (E p _ _) = p
+
+getOutputD :: T -> D
+getOutputD (E _ _ b) = b
+getOutputD (I _ b) = b
+
+infer :: Term -> Either String T
+infer (Id a) = Right $ E (0,0) a a
+infer (Loss p a) = Right $ E p a (1,1)
+infer Alpha = Right $ E (0,0) (1,1) (0,0)
+infer (Model p a b) = Right $ E p a b
+infer (Hide t) = do
+    u <- infer t
+    case u of
+        (E p a b) -> Right $ I a b
+        _ -> Left "Invalid input type for Hide"
+infer (Comp t1 t2) = do
+    u1 <- infer t1
+    u2 <- infer t2
+    case (u2, u1) of
+        (E p1 a1 b1, E p2 a2 b2) ->
+            if b1 == a2
+                then Right $ E (addD p1 p2) a1 b2
+            else Left "Unfitting Dimensions for Comp"
+        (I a1 b1, I a2 b2) ->
+            if b1 == a2
+                then Right $ I a1 b2
+            else Left "Unfitting Dimensions for Comp"
+        _ -> Left "Invalid input type(s) for Comp"
+infer (PComp t1 t2) = do
+    u1 <- infer t1
+    u2 <- infer t2
+    case (u2, u1) of
+        (E p1 a1 b1, E p2 a2 b2) ->
+            if b1 == p2
+                then Right $ E p1 a1 b2
+            else Left "Unfitting Dimensions for PComp"
+        _ -> Left "Invalid input type(s) for PComp"
+infer (Tensor t1 t2) = do
+    u1 <- infer t1
+    u2 <- infer t2
+    case (u1, u2) of
+        (E p1 a1 b1, E p2 a2 b2) -> Right $ E (addD p1 p2) (addD a1 a2) (addD b1 b2)
+        (I a1 b1, I a2 b2) -> Right $ I (addD a1 a2) (addD b1 b2)
+        _ -> Left "Invalid input type(s) for Tensor"
+
+interp :: forall t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     (Data.Complex.Complex Float),
                                     Data.Int.Int16, Data.Int.Int32,
                                     Data.Int.Int64, Data.Int.Int8,
                                     Data.Word.Word16, Data.Word.Word8, Double,
-                                    Float] t) => TF.Tensor v'1 t -> (TF.Variable t, TF.Variable t) -> TF.Tensor TF.Build t
-f_fwd x (a, b) = ( x `TF.mul` TF.readValue a) `TF.add` TF.readValue b
+                                    Float] t) => Term -> Lens (TF.Tensor TF.Build t,TF.Tensor TF.Build t) (TF.Tensor TF.Build t,TF.Tensor TF.Build t) (TF.Tensor TF.Build t) (TF.Tensor TF.Build t)
+interp (Loss p a) = lens loss_fwd loss_rev
+interp Alpha = lens alpha_fwd alpha_rev
+interp (Model p a b) = lens f_fwd f_rev
+interp (Comp t1 t2) = do
+    let lens1 = interp t1
+    let lens2 = interp t2
+
+    let paramD1 = head (rights [fmap getParaD (infer t1)])
+    let pd1 = TF.vector [(fst (paramD1))]
+    let paramD2 = head (rights [fmap getParaD (infer t2)])
+    let pd2 = TF.vector [(fst (paramD2))]
+
+    let lens1_fwd = (^# lens1)
+    let lens2_fwd = (^# lens2)
+    let res_fwd = A.first (A.arr (\ (pq) -> (TF.slice pq 0 pd1, TF.slice pq pd1 pd2))) A.>>> A.arr (\ ((p,q),a) -> ((p,a),q)) A.>>> A.first lens1_fwd A.>>>  A.arr (\ (x,y) -> (y,x)) A.>>> A.arr (\ (x,y) -> lens2_fwd (x,y))
+
+    let lens1_rev = (flip (storing lens1))
+    let lens2_rev = (flip (storing lens2))
+    let res_rev = A.first (A.first (A.arr (\ (pq) -> (TF.slice pq 0 pd1, TF.slice pq pd1 pd2)))) A.>>> A.arr (\ (((p,q),a),b) -> ((((p,a),q),b),(p,a))) A.>>> A.first (A.first (A.first lens1_fwd)) A.>>> A.first (A.arr (\ ((a,q),b) -> (lens2_rev (q,a) b))) A.>>> A.arr (\ ((p,a),(q,b)) -> ((lens1_rev (p,a) b),q)) A.>>> A.arr (\ ((p,a),q) -> ( TF.concat 0 [p, q], a))
+
+    lens res_fwd (curry res_rev)
+    -- lens res_fwd (lens1_rev)
+interp (Tensor t1 t2) = do
+    let lens1 = interp t1
+    let lens2 = interp t2
+
+    let paramD1 = head (rights [fmap getParaD (infer t1)])
+    let pd1 = TF.vector [(fst (paramD1))]
+    let paramD2 = head (rights [fmap getParaD (infer t2)])
+    let pd2 = TF.vector [(fst (paramD2))]
+    let inputD1 = head (rights [fmap getInputD (infer t1)])
+    let id1 = TF.vector [(fst (inputD1))]
+    let inputD2 = head (rights [fmap getInputD (infer t2)])
+    let id2 = TF.vector [(fst (inputD2))]
+    let outputD1 = head (rights [fmap getOutputD (infer t1)])
+    let od1 = TF.vector [(fst (outputD1))]
+    let outputD2 = head (rights [fmap getOutputD (infer t2)])
+    let od2 = TF.vector [(fst (outputD2))]
+
+    let lens1_fwd = (^# lens1)
+    let lens2_fwd = (^# lens2)
+    let res_fwd = A.arr (\ (p,a) -> ((TF.slice p 0 pd1, TF.slice p pd1 pd2), (TF.slice a 0 id1, TF.slice a id1 id2))) A.>>> A.arr (\ ((p1,p2),(a1,a2)) -> ( TF.concat 1 [lens1_fwd (p1,a1), lens2_fwd (p2,a2)]))
+
+    let lens1_rev = (flip (storing lens1))
+    let lens2_rev = (flip (storing lens2))
+    let res_rev = A.arr (\ ((p,a),b) -> (((TF.slice p 0 pd1, TF.slice p pd1 pd2), (TF.slice a 0 id1, TF.slice a id1 id2)), (TF.slice b 0 od1, TF.slice b od1 od2))) A.>>> A.arr (\ (((p1,p2),(a1,a2)),(b1,b2)) -> (lens1_rev (p1,a1) b1, lens2_rev (p2,a2) b2)) A.>>> A.arr (\ ((p1,a1),(p2,a2)) -> (TF.concat 0 [p1, p2], TF.concat 0 [a1, a2]))
+
+    lens res_fwd (curry res_rev)
+interp (PComp t1 t2) = do
+    let lens1 = interp t1
+    let lens2 = interp t2
+
+    let inputD1 = head (rights [fmap getInputD (infer t1)])
+    let id1 = TF.vector [(fst (inputD1))]
+    let inputD2 = head (rights [fmap getInputD (infer t2)])
+    let id2 = TF.vector [(fst (inputD2))]
+
+    let lens1_fwd = (^# lens1)
+    let lens2_fwd = (^# lens2)
+    let res_fwd = A.arr (\ (p,a) -> (p, (TF.slice a 0 id1, TF.slice a id1 id2))) A.>>> A.arr (\ (p,(a1,a2)) -> (lens1_fwd (p,a1),a2)) A.>>> lens2_fwd
+
+    let lens1_rev = (flip (storing lens1))
+    let lens2_rev = (flip (storing lens2))
+    let res_rev = A.arr (\ ((p,a),b) -> ((p, (TF.slice a 0 id1, TF.slice a id1 id2)),b)) A.>>> A.arr (\ ((p,(a1,a2)),b) -> (((lens1_fwd (p,a1),a2),b),(p,a1))) A.>>> A.first (A.arr (\ ((p,a),b) -> lens2_rev (p,a) b)) A.>>> A.arr (\ ((p1,a1),(p2,a2)) -> (lens1_rev (p2,a2) p1,a1)) A.>>> A.arr (\ ((p,a1),a2) -> (p,TF.concat 0 [a1, a2]))
+
+    lens res_fwd (curry res_rev)
+
+-- Forward function of the model component
+-- Simply constructs the predicted y values out of the given x, a and b
+f_fwd :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
+                                    (Data.Complex.Complex Float),
+                                    Data.Int.Int16, Data.Int.Int32,
+                                    Data.Int.Int64, Data.Int.Int8,
+                                    Data.Word.Word16, Data.Word.Word8, Double,
+                                    Float] t) => (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor TF.Build t
+f_fwd (p, a) = ( a `TF.mul` (TF.slice p 0 (TF.constant (TF.Shape [1]) [1 :: Int32]))) `TF.add` (TF.slice p 1 (TF.constant (TF.Shape [1]) [1 :: Int32]))
 
 -- Reverse function of the model component
 -- Meant to use the Transposed Jacobian of the forward function and multiply this by the loss values
 -- Due to each equation being the same and containing only one variable, this simplifies to multiplying the loss values by a
-f_rev :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
+f_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     (Data.Complex.Complex Float),
                                     Data.Int.Int16, Data.Int.Int32,
                                     Data.Int.Int64, Data.Int.Int8,
                                     Data.Word.Word16, Data.Word.Word8, Double,
-                                    Float] t) => TF.Tensor v'1 t -> TF.Tensor v'2 t -> (TF.Variable t, TF.Variable t) -> (TF.Tensor TF.Build t, (TF.Variable t, TF.Variable t))
-f_rev x loss (a, b) = (TF.readValue a `TF.mul` loss, (a, b))
+                                    Float] t) => (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> (TF.Tensor v'1 t, TF.Tensor TF.Build t)
+f_rev (p, a) b = (p, (TF.slice p 0 (TF.constant (TF.Shape [1]) [1 :: Int32])) `TF.mul` b)
 
 -- Forward for the loss function
 -- Simply takes the squared difference between the predicted (yhat) and true (y) values
@@ -64,19 +208,55 @@ loss_fwd :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     Data.Int.Int64, Data.Int.Int8,
                                     Data.Word.Word16, Data.Word.Word8, Double,
                                     Float] t) => 
-                        TF.Tensor v'1 t -> TF.Tensor v'2 t -> TF.Tensor TF.Build t
-loss_fwd yHat y = TF.square (yHat `TF.sub` y)
+                        (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor TF.Build t
+loss_fwd (yHat, y) = TF.square (yHat `TF.sub` y)
 
 -- Reverse for the loss function
 -- Returns two nearly identical vectors containing the loss between predicted (yhat) and true (y) values, multiplied by the learning rate
-loss_rev :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
+loss_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     (Data.Complex.Complex Float),
                                     Data.Int.Int16, Data.Int.Int32,
                                     Data.Int.Int64, Data.Int.Int8,
                                     Data.Word.Word16, Data.Word.Word8, Double,
                                     Float] t) => 
-                        TF.Tensor v'1 t -> TF.Tensor v'2 t -> TF.Variable t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
-loss_rev yHat y a = (TF.readValue a `TF.mul` (yHat `TF.sub` y), TF.readValue a `TF.mul` (y `TF.sub` yHat))
+                        (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
+loss_rev (yHat, y) a = (a `TF.mul` (yHat `TF.sub` y), a `TF.mul` (y `TF.sub` yHat))
+
+alpha_fwd :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
+                                    (Data.Complex.Complex Float),
+                                    Data.Int.Int16, Data.Int.Int32,
+                                    Data.Int.Int64, Data.Int.Int8,
+                                    Data.Word.Word16, Data.Word.Word8, Double,
+                                    Float] t) => 
+                        (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor TF.Build t
+alpha_fwd (_,_) = TF.constant (TF.Shape [0]) []
+
+alpha_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
+                                    (Data.Complex.Complex Float),
+                                    Data.Int.Int16, Data.Int.Int32,
+                                    Data.Int.Int64, Data.Int.Int8,
+                                    Data.Word.Word16, Data.Word.Word8, Double,
+                                    Float] t) => 
+                        (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build Float)
+alpha_rev (_,_) _ = (TF.constant (TF.Shape [0]) [],TF.constant (TF.Shape [1]) [0.001 :: Float])
+
+-- grad_fwd :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
+--                                     (Data.Complex.Complex Float),
+--                                     Data.Int.Int16, Data.Int.Int32,
+--                                     Data.Int.Int64, Data.Int.Int8,
+--                                     Data.Word.Word16, Data.Word.Word8, Double,
+--                                     Float] t) => 
+--                         (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'2 t
+-- grad_fwd (p,_) = p
+
+-- grad_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
+--                                     (Data.Complex.Complex Float),
+--                                     Data.Int.Int16, Data.Int.Int32,
+--                                     Data.Int.Int64, Data.Int.Int8,
+--                                     Data.Word.Word16, Data.Word.Word8, Double,
+--                                     Float] t) => 
+--                         (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
+-- grad_rev (p,_) b = 
 
 main :: IO ()
 main = do
