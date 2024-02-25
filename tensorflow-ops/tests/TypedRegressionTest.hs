@@ -5,10 +5,10 @@
 
 import Control.Monad (replicateM, replicateM_)
 import System.Random (randomIO)
-import Test.HUnit (assertBool)
+import Test.HUnit ((@=?),assertBool)
 
 import qualified TensorFlow.Core as TF
-import qualified TensorFlow.GenOps.Core as TF
+import qualified TensorFlow.GenOps.Core as TF hiding (assignAdd)
 import qualified TensorFlow.Minimize as TF
 import qualified TensorFlow.Ops as TF hiding (initializedVariable,shape)
 import qualified TensorFlow.Variable as TF
@@ -16,6 +16,7 @@ import qualified TensorFlow.Tensor as TF (toTensor)
 
 import Prelude hiding (id,(.))
 import Control.Category
+import Control.Monad (zipWithM)
 import Data.Complex (Complex)
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Word (Word8, Word16, Word32, Word64)
@@ -52,7 +53,9 @@ data Term =
     -- Loss and Alpha as base terms, see the type checker for their definitions
     Loss D D |
     Alpha |
-    Model D D D
+    Model D D D |
+    Grad D D |
+    Ex1 D D D
     deriving (Show,Eq)
 
 getInputD :: T -> D
@@ -71,6 +74,8 @@ infer (Id a) = Right $ E (0,0) a a
 infer (Loss p a) = Right $ E p a (1,1)
 infer Alpha = Right $ E (0,0) (1,1) (0,0)
 infer (Model p a b) = Right $ E p a b
+infer (Grad p b) = Right $ E p (0,0) b
+-- infer (Ex1 p a b) = Right $ E p a b
 infer (Hide t) = do
     u <- infer t
     case u of
@@ -115,6 +120,8 @@ interp :: forall t . (TF.OneOf '[(Data.Complex.Complex Double),
 interp (Loss p a) = lens loss_fwd loss_rev
 interp Alpha = lens alpha_fwd alpha_rev
 interp (Model p a b) = lens f_fwd f_rev
+interp (Grad p b) = lens grad_fwd grad_rev
+-- interp (Ex1 p a b) = lens ex1_fwd ex1_rev
 interp (Comp t1 t2) = do
     let lens1 = interp t1
     let lens2 = interp t2
@@ -130,7 +137,7 @@ interp (Comp t1 t2) = do
 
     let lens1_rev = (flip (storing lens1))
     let lens2_rev = (flip (storing lens2))
-    let res_rev = A.first (A.first (A.arr (\ (pq) -> (TF.slice pq 0 pd1, TF.slice pq pd1 pd2)))) A.>>> A.arr (\ (((p,q),a),b) -> ((((p,a),q),b),(p,a))) A.>>> A.first (A.first (A.first lens1_fwd)) A.>>> A.first (A.arr (\ ((a,q),b) -> (lens2_rev (q,a) b))) A.>>> A.arr (\ ((p,a),(q,b)) -> ((lens1_rev (p,a) b),q)) A.>>> A.arr (\ ((p,a),q) -> ( TF.concat 0 [p, q], a))
+    let res_rev = A.first (A.first (A.arr (\ (pq) -> (TF.slice pq 0 pd1, TF.slice pq pd1 pd2)))) A.>>> A.arr (\ (((p,q),a),b) -> ((((p,a),q),b),(p,a))) A.>>> A.first (A.first (A.first lens1_fwd)) A.>>> A.first (A.arr (\ ((a,q),b) -> (lens2_rev (q,a) b))) A.>>> A.arr (\ ((p,a),(q,b)) -> ((lens1_rev (q,b) a),p)) A.>>> A.arr (\ ((p,a),q) -> ( TF.concat 0 [p, q], a))
 
     lens res_fwd (curry res_rev)
     -- lens res_fwd (lens1_rev)
@@ -191,14 +198,14 @@ f_fwd (p, a) = ( a `TF.mul` (TF.slice p 0 (TF.constant (TF.Shape [1]) [1 :: Int3
 
 -- Reverse function of the model component
 -- Meant to use the Transposed Jacobian of the forward function and multiply this by the loss values
--- Due to each equation being the same and containing only one variable, this simplifies to multiplying the loss values by a
-f_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
+-- Due to each equation being the same and containing only one variable, this simplifies to multiplying the loss values by the first parameter
+f_rev :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     (Data.Complex.Complex Float),
                                     Data.Int.Int16, Data.Int.Int32,
                                     Data.Int.Int64, Data.Int.Int8,
                                     Data.Word.Word16, Data.Word.Word8, Double,
-                                    Float] t) => (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> (TF.Tensor v'1 t, TF.Tensor TF.Build t)
-f_rev (p, a) b = (p, (TF.slice p 0 (TF.constant (TF.Shape [1]) [1 :: Int32])) `TF.mul` b)
+                                    Float] t) => (TF.Tensor v'1 t, TF.Tensor TF.Build t) -> TF.Tensor v'2 t -> (TF.Tensor TF.Build t, TF.Tensor TF.Build t)
+f_rev (p, a) b = (TF.concat 0 [TF.mean (a `TF.mul` b) (TF.constant (TF.Shape [1]) [0 :: Int32]), TF.mean b (TF.constant (TF.Shape [1]) [0 :: Int32])], a)
 
 -- Forward for the loss function
 -- Simply takes the squared difference between the predicted (yhat) and true (y) values
@@ -213,14 +220,14 @@ loss_fwd (yHat, y) = TF.square (yHat `TF.sub` y)
 
 -- Reverse for the loss function
 -- Returns two nearly identical vectors containing the loss between predicted (yhat) and true (y) values, multiplied by the learning rate
-loss_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
+loss_rev :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     (Data.Complex.Complex Float),
                                     Data.Int.Int16, Data.Int.Int32,
                                     Data.Int.Int64, Data.Int.Int8,
                                     Data.Word.Word16, Data.Word.Word8, Double,
                                     Float] t) => 
-                        (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
-loss_rev (yHat, y) a = (a `TF.mul` (yHat `TF.sub` y), a `TF.mul` (y `TF.sub` yHat))
+                        (TF.Tensor v'1 t, TF.Tensor TF.Build t) -> TF.Tensor v'2 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
+loss_rev (yHat, y) a = (y, a `TF.mul` (y `TF.sub` yHat))
 
 alpha_fwd :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     (Data.Complex.Complex Float),
@@ -237,26 +244,44 @@ alpha_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     Data.Int.Int64, Data.Int.Int8,
                                     Data.Word.Word16, Data.Word.Word8, Double,
                                     Float] t) => 
-                        (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build Float)
-alpha_rev (_,_) _ = (TF.constant (TF.Shape [0]) [],TF.constant (TF.Shape [1]) [0.001 :: Float])
+                        (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor TF.Build t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
+alpha_rev (_,_) a = (TF.constant (TF.Shape [0]) [], a)
 
--- grad_fwd :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
+grad_fwd :: forall v'1 t . (TF.OneOf '[(Data.Complex.Complex Double),
+                                    (Data.Complex.Complex Float),
+                                    Data.Int.Int16, Data.Int.Int32,
+                                    Data.Int.Int64, Data.Int.Int8,
+                                    Data.Word.Word16, Data.Word.Word8, Double,
+                                    Float] t) => 
+                        (TF.Tensor TF.Build t, TF.Tensor v'1 t) -> TF.Tensor TF.Build t
+grad_fwd (p,_) = p
+
+grad_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
+                                    (Data.Complex.Complex Float),
+                                    Data.Int.Int16, Data.Int.Int32,
+                                    Data.Int.Int64, Data.Int.Int8,
+                                    Data.Word.Word16, Data.Word.Word8, Double,
+                                    Float] t) => 
+                        (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
+grad_rev (p,_) b = (p `TF.add` b, TF.constant (TF.Shape [0]) [])
+
+-- ex1_fwd :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
 --                                     (Data.Complex.Complex Float),
 --                                     Data.Int.Int16, Data.Int.Int32,
 --                                     Data.Int.Int64, Data.Int.Int8,
 --                                     Data.Word.Word16, Data.Word.Word8, Double,
 --                                     Float] t) => 
---                         (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'2 t
--- grad_fwd (p,_) = p
+--                         (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor TF.Build t
+-- ex1_fwd (p, a) = a `TF.add` p
 
--- grad_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
+-- ex1_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
 --                                     (Data.Complex.Complex Float),
 --                                     Data.Int.Int16, Data.Int.Int32,
 --                                     Data.Int.Int64, Data.Int.Int8,
 --                                     Data.Word.Word16, Data.Word.Word8, Double,
 --                                     Float] t) => 
 --                         (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
--- grad_rev (p,_) b = 
+-- ex1_rev (p, a) b = (b `TF.mul` (a `TF.add` p), b `TF.mul` (a `TF.sub` p))
 
 main :: IO ()
 main = do
@@ -267,6 +292,44 @@ main = do
     (w, b) <- fit xData yData
     assertBool "w == 3" (abs (3 - w) < 0.001)
     assertBool "b == 8" (abs (8 - b) < 0.001)
+    (w',b') <- typedFit xData yData
+    assertBool "w' == 3" (abs (3 - w') < 0.001)
+    assertBool "b' == 8" (abs (8 - b') < 0.001)
+
+typedFit :: [Float] -> [Float] -> IO (Float, Float)
+typedFit xData yData = TF.runSession $ do
+    -- Create tensorflow constants for x and y.
+    let x = TF.vector xData
+        y = TF.vector yData
+    -- Create scalar variables for slope and intercept.
+    w <- TF.initializedVariable 0
+    b <- TF.initializedVariable 0
+    -- Define the loss function.
+    let yHat = (x `TF.mul` TF.readValue w) `TF.add` TF.readValue b
+        loss = TF.square (yHat `TF.sub` y)
+    
+    let f_lens = interp (Model (2,2) (100,100) (100,100))
+    let loss_lens = interp (Loss (100,100) (100,100))
+    let alpha_lens = interp (Alpha)
+    -- let grad_lens = interp (Grad (2,2) (2,2))
+    -- let pipeline_grad = interp (Comp (PComp (Grad (2,2) (2,2)) (Model (2,2) (100,100) (100,100))) (Comp (Loss (100,100) (100,100)) (Alpha)))
+    let pipeline = interp (Comp (PComp (Grad (2,2) (2,2)) (Model (2,2) (100,100) (100,100))) (Comp (Loss (100,100) (100,100)) (Alpha)))
+    -- let ex1_lens = interp (Ex1 (1,1) (1,1) (1,1))
+    --     x = TF.vector [3]
+    --     y = TF.vector [2]
+    --     z = TF.vector [4]
+    -- res <- (x,y)^.ex1_lens
+    -- Optimize with gradient descent.
+    let mod_rev = set f_lens y (TF.concat 0 [TF.readValue w, TF.readValue b],x)
+    let res_rev = set pipeline (TF.constant (TF.Shape [1]) [0.001] ) (TF.concat 0 [TF.concat 0 [TF.readValue w, TF.readValue b],y],x)
+     -- let sq_loss = TF.slice (res_rev ^. _1) (TF.constant (TF.Shape [1]) [2 :: Int32]) (TF.constant (TF.Shape [1]) [100 :: Int32])
+    let sq_param = TF.slice (fst mod_rev) (TF.constant (TF.Shape [1]) [0 :: Int32]) (TF.constant (TF.Shape [1]) [1 :: Int32])
+    TF.group =<< zipWithM TF.assignAdd [w,b] [sq_param]
+    -- trainStep <- TF.minimizeWith (TF.gradientDescent 0.001) loss [w, b]
+    -- replicateM_ 1000 (TF.run trainStep)
+    -- Return the learned parameters.
+    (TF.Scalar w', TF.Scalar b') <- TF.run (TF.readValue w, TF.readValue b)
+    return (w', b')
 
 fit :: [Float] -> [Float] -> IO (Float, Float)
 fit xData yData = TF.runSession $ do
@@ -279,6 +342,11 @@ fit xData yData = TF.runSession $ do
     -- Define the loss function.
     let yHat = (x `TF.mul` TF.readValue w) `TF.add` TF.readValue b
         loss = TF.square (yHat `TF.sub` y)
+    
+    -- let f_lens = interp (Model (2,2) (100,100) (100,100))
+    -- let loss_lens = interp (Loss (100,100) (100,100))
+    -- let alpha_lens = interp (Alpha)
+    -- let pipeline = interp (Comp (Model (2,2) (100,100) (100,100)) (Comp (Loss (100,100) (100,100)) (Alpha)))
     -- Optimize with gradient descent.
     trainStep <- TF.minimizeWith (TF.gradientDescent 0.001) loss [w, b]
     replicateM_ 1000 (TF.run trainStep)
