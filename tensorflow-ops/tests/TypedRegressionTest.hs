@@ -75,7 +75,6 @@ infer (Loss p a) = Right $ E p a (1,1)
 infer Alpha = Right $ E (0,0) (1,1) (0,0)
 infer (Model p a b) = Right $ E p a b
 infer (Grad p b) = Right $ E p (0,0) b
--- infer (Ex1 p a b) = Right $ E p a b
 infer (Hide t) = do
     u <- infer t
     case u of
@@ -121,7 +120,6 @@ interp (Loss p a) = lens loss_fwd loss_rev
 interp Alpha = lens alpha_fwd alpha_rev
 interp (Model p a b) = lens f_fwd f_rev
 interp (Grad p b) = lens grad_fwd grad_rev
--- interp (Ex1 p a b) = lens ex1_fwd ex1_rev
 interp (Comp t1 t2) = do
     let lens1 = interp t1
     let lens2 = interp t2
@@ -140,7 +138,6 @@ interp (Comp t1 t2) = do
     let res_rev = A.first (A.first (A.arr (\ (pq) -> (TF.slice pq 0 pd1, TF.slice pq pd1 pd2)))) A.>>> A.arr (\ (((p,q),a),b) -> ((((p,a),q),b),(p,a))) A.>>> A.first (A.first (A.first lens1_fwd)) A.>>> A.first (A.arr (\ ((a,q),b) -> (lens2_rev (q,a) b))) A.>>> A.arr (\ ((p,a),(q,b)) -> ((lens1_rev (q,b) a),p)) A.>>> A.arr (\ ((p,a),q) -> ( TF.concat 0 [p, q], a))
 
     lens res_fwd (curry res_rev)
-    -- lens res_fwd (lens1_rev)
 interp (Tensor t1 t2) = do
     let lens1 = interp t1
     let lens2 = interp t2
@@ -264,24 +261,6 @@ grad_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
                                     Float] t) => 
                         (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
 grad_rev (p,_) b = (p `TF.add` b, TF.constant (TF.Shape [0]) [])
-
--- ex1_fwd :: forall v'1 v'2 t . (TF.OneOf '[(Data.Complex.Complex Double),
---                                     (Data.Complex.Complex Float),
---                                     Data.Int.Int16, Data.Int.Int32,
---                                     Data.Int.Int64, Data.Int.Int8,
---                                     Data.Word.Word16, Data.Word.Word8, Double,
---                                     Float] t) => 
---                         (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor TF.Build t
--- ex1_fwd (p, a) = a `TF.add` p
-
--- ex1_rev :: forall v'1 v'2 v'3 t . (TF.OneOf '[(Data.Complex.Complex Double),
---                                     (Data.Complex.Complex Float),
---                                     Data.Int.Int16, Data.Int.Int32,
---                                     Data.Int.Int64, Data.Int.Int8,
---                                     Data.Word.Word16, Data.Word.Word8, Double,
---                                     Float] t) => 
---                         (TF.Tensor v'1 t, TF.Tensor v'2 t) -> TF.Tensor v'3 t -> ( TF.Tensor TF.Build t, TF.Tensor TF.Build t)
--- ex1_rev (p, a) b = (b `TF.mul` (a `TF.add` p), b `TF.mul` (a `TF.sub` p))
 
 main :: IO ()
 main = do
