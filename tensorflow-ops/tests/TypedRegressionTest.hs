@@ -275,6 +275,7 @@ main = do
     assertBool "w' == 3" (abs (3 - w') < 0.001)
     assertBool "b' == 8" (abs (8 - b') < 0.001)
 
+-- This is the function for the typed regression
 typedFit :: [Float] -> [Float] -> IO (Float, Float)
 typedFit xData yData = TF.runSession $ do
     -- Create tensorflow constants for x and y.
@@ -287,21 +288,15 @@ typedFit xData yData = TF.runSession $ do
     let yHat = (x `TF.mul` TF.readValue w) `TF.add` TF.readValue b
         loss = TF.square (yHat `TF.sub` y)
     
-    let f_lens = interp (Model (2,2) (100,100) (100,100))
-    let loss_lens = interp (Loss (100,100) (100,100))
-    let alpha_lens = interp (Alpha)
+    -- let f_lens = interp (Model (2,2) (100,100) (100,100))
+    -- let loss_lens = interp (Loss (100,100) (100,100))
+    -- let alpha_lens = interp (Alpha)
     -- let grad_lens = interp (Grad (2,2) (2,2))
-    -- let pipeline_grad = interp (Comp (PComp (Grad (2,2) (2,2)) (Model (2,2) (100,100) (100,100))) (Comp (Loss (100,100) (100,100)) (Alpha)))
     let pipeline = interp (Comp (PComp (Grad (2,2) (2,2)) (Model (2,2) (100,100) (100,100))) (Comp (Loss (100,100) (100,100)) (Alpha)))
-    -- let ex1_lens = interp (Ex1 (1,1) (1,1) (1,1))
-    --     x = TF.vector [3]
-    --     y = TF.vector [2]
-    --     z = TF.vector [4]
-    -- res <- (x,y)^.ex1_lens
     -- Optimize with gradient descent.
     let mod_rev = set f_lens y (TF.concat 0 [TF.readValue w, TF.readValue b],x)
     let res_rev = set pipeline (TF.constant (TF.Shape [1]) [0.001] ) (TF.concat 0 [TF.concat 0 [TF.readValue w, TF.readValue b],y],x)
-     -- let sq_loss = TF.slice (res_rev ^. _1) (TF.constant (TF.Shape [1]) [2 :: Int32]) (TF.constant (TF.Shape [1]) [100 :: Int32])
+    
     let sq_param = TF.slice (fst mod_rev) (TF.constant (TF.Shape [1]) [0 :: Int32]) (TF.constant (TF.Shape [1]) [1 :: Int32])
     TF.group =<< zipWithM TF.assignAdd [w,b] [sq_param]
     -- trainStep <- TF.minimizeWith (TF.gradientDescent 0.001) loss [w, b]
