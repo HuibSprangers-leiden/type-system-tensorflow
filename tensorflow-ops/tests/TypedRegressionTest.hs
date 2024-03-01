@@ -276,6 +276,11 @@ main = do
     assertBool "b' == 8" (abs (8 - b') < 0.001)
 
 -- This is the function for the typed regression
+-- To run only this file, use the command sudo stack --docker test tensorflow-ops
+-- if this tells you permission denied, add the --allow-different-user option
+-- Current this gives the error that you can't concatenate scalars, this is the error for concatenating scalars
+-- if you want to see the error the full pipeline gives, use (fst res_rev) instead of (fst mod_rev) when obtaining sq_param
+-- using the full pipeline give the error Prelude.head: empty list, this is the error for concatenating/splitting empty lists
 typedFit :: [Float] -> [Float] -> IO (Float, Float)
 typedFit xData yData = TF.runSession $ do
     -- Create tensorflow constants for x and y.
@@ -288,15 +293,15 @@ typedFit xData yData = TF.runSession $ do
     let yHat = (x `TF.mul` TF.readValue w) `TF.add` TF.readValue b
         loss = TF.square (yHat `TF.sub` y)
     
-    -- let f_lens = interp (Model (2,2) (100,100) (100,100))
-    -- let loss_lens = interp (Loss (100,100) (100,100))
-    -- let alpha_lens = interp (Alpha)
-    -- let grad_lens = interp (Grad (2,2) (2,2))
+    let f_lens = interp (Model (2,2) (100,100) (100,100))
+    let loss_lens = interp (Loss (100,100) (100,100))
+    let alpha_lens = interp (Alpha)
+    let grad_lens = interp (Grad (2,2) (2,2))
     let pipeline = interp (Comp (PComp (Grad (2,2) (2,2)) (Model (2,2) (100,100) (100,100))) (Comp (Loss (100,100) (100,100)) (Alpha)))
-    -- Optimize with gradient descent.
+    -- Examples for the reverse function of the model and the entire pipeline
     let mod_rev = set f_lens y (TF.concat 0 [TF.readValue w, TF.readValue b],x)
     let res_rev = set pipeline (TF.constant (TF.Shape [1]) [0.001] ) (TF.concat 0 [TF.concat 0 [TF.readValue w, TF.readValue b],y],x)
-    
+    -- Line that should pick out the parameters
     let sq_param = TF.slice (fst mod_rev) (TF.constant (TF.Shape [1]) [0 :: Int32]) (TF.constant (TF.Shape [1]) [1 :: Int32])
     TF.group =<< zipWithM TF.assignAdd [w,b] [sq_param]
     -- trainStep <- TF.minimizeWith (TF.gradientDescent 0.001) loss [w, b]
