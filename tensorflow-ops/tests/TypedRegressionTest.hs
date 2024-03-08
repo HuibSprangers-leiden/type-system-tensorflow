@@ -83,7 +83,7 @@ infer (Hide t) = do
 infer (Comp t1 t2) = do
     u1 <- infer t1
     u2 <- infer t2
-    case (u2, u1) of
+    case (u1, u2) of
         (E p1 a1 b1, E p2 a2 b2) ->
             if b1 == a2
                 then Right $ E (addD p1 p2) a1 b2
@@ -96,7 +96,7 @@ infer (Comp t1 t2) = do
 infer (PComp t1 t2) = do
     u1 <- infer t1
     u2 <- infer t2
-    case (u2, u1) of
+    case (u1, u2) of
         (E p1 a1 b1, E p2 a2 b2) ->
             if b1 == p2
                 then Right $ E p1 a1 b2
