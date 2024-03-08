@@ -278,9 +278,8 @@ main = do
 -- This is the function for the typed regression
 -- To run only this file, use the command sudo stack --docker test tensorflow-ops
 -- if this tells you permission denied, add the --allow-different-user option
--- Current this gives the error that you can't concatenate scalars, this is the error for concatenating scalars
+-- Current this gives the error that you can't concatenate scalars, this is the error for concatenating tensors of low dimensions
 -- if you want to see the error the full pipeline gives, use (fst res_rev) instead of (fst mod_rev) when obtaining sq_param
--- using the full pipeline give the error Prelude.head: empty list, this is the error for concatenating/splitting empty lists
 typedFit :: [Float] -> [Float] -> IO (Float, Float)
 typedFit xData yData = TF.runSession $ do
     -- Create tensorflow constants for x and y.
